@@ -22,10 +22,11 @@ bot = Bot(token=TELEGRAM_BOT_TOKEN)
 # ==================================================
 
 connection = pyodbc.connect(
-    "DRIVER={ODBC Driver 17 for SQL Server};"
+    "DRIVER={ODBC Driver 18 for SQL Server};"
     "SERVER=CANER;"
     "DATABASE=AIPriceAgent;"
     "Trusted_Connection=yes;"
+    "TrustServerCertificate=yes;"
 )
 
 cursor = connection.cursor()
@@ -61,7 +62,8 @@ cursor.execute("""
 
 tracked_products = cursor.fetchall()
 
-print(tracked_products)
+
+print("📦 Takip edilen ürün sayısı:", len(tracked_products))
 
 
 # ==================================================
@@ -78,7 +80,7 @@ for tracked in tracked_products:
 
 
     # ==================================================
-    # ÜRÜNÜN ESKİ VE YENİ FİYATINI AL
+    # ÜRÜNÜN SON 2 FİYATINI AL
     # ==================================================
 
     cursor.execute("""
@@ -93,7 +95,14 @@ for tracked in tracked_products:
     prices = cursor.fetchall()
 
 
+    # Henüz yeterli fiyat geçmişi yoksa geç
     if len(prices) < 2:
+
+        print(
+            f"⚠️ Ürün ID {product_id} için "
+            f"yeterli fiyat geçmişi yok."
+        )
+
         continue
 
 
@@ -103,11 +112,10 @@ for tracked in tracked_products:
 
     print("------------------------------")
     print(f"Ürün ID: {product_id}")
-    print(f"Eski fiyat: {old_price}")
-    print(f"Yeni fiyat: {new_price}")
-    print(f"Hedef fiyat: {target_price}")
+    print(f"Eski fiyat: {old_price:,} TL")
+    print(f"Yeni fiyat: {new_price:,} TL")
+    print(f"Hedef fiyat: {target_price:,} TL")
     print(f"Son bildirim fiyatı: {last_notified_price}")
-    print(f"Chat ID: {chat_id}")
 
 
     # ==================================================
@@ -118,8 +126,8 @@ for tracked in tracked_products:
 
         drop = old_price - new_price
 
-        print("FİYAT DÜŞTÜ!")
-        print(f"Düşüş: {drop}")
+        print("📉 FİYAT DÜŞTÜ!")
+        print(f"Düşüş: {drop:,} TL")
 
 
         # ==================================================
@@ -128,7 +136,7 @@ for tracked in tracked_products:
 
         if new_price <= target_price:
 
-            print("HEDEF FİYATA ULAŞILDI!")
+            print("🎯 HEDEF FİYATA ULAŞILDI!")
 
 
             # ==================================================
@@ -137,8 +145,9 @@ for tracked in tracked_products:
 
             if last_notified_price == new_price:
 
-                print("⚠️ Bu fiyat için bildirim zaten gönderilmiş.")
-                print("📭 Yeni bildirim gönderilmeyecek.")
+                print(
+                    "⚠️ Bu fiyat için bildirim zaten gönderilmiş."
+                )
 
                 continue
 
@@ -147,17 +156,14 @@ for tracked in tracked_products:
             # TELEGRAM MESAJI
             # ==================================================
 
-            message = f"""
-📉 FİYAT DÜŞTÜ!
-
-Ürün ID: {product_id}
-
-Eski fiyat: {old_price:,} TL
-Yeni fiyat: {new_price:,} TL
-Hedef fiyat: {target_price:,} TL
-
-💰 Tasarruf: {old_price - new_price:,} TL
-"""
+            message = (
+                "🚨 FİYAT ALARMI!\n\n"
+                f"Ürün ID: {product_id}\n\n"
+                f"📉 Eski fiyat: {old_price:,} TL\n"
+                f"💰 Yeni fiyat: {new_price:,} TL\n"
+                f"🎯 Hedef fiyat: {target_price:,} TL\n\n"
+                f"💵 Tasarruf: {drop:,} TL"
+            )
 
 
             # ==================================================
@@ -190,7 +196,22 @@ Hedef fiyat: {target_price:,} TL
 
             connection.commit()
 
-            print("✅ Son bildirim fiyatı SQL'e kaydedildi.")
+
+            print(
+                "✅ Son bildirim fiyatı SQL'e kaydedildi."
+            )
+
+
+        else:
+
+            print(
+                "ℹ️ Fiyat düştü fakat henüz hedef fiyata ulaşmadı."
+            )
+
+
+    else:
+
+        print("➡️ Fiyat düşmedi.")
 
 
 # ==================================================
@@ -200,4 +221,5 @@ Hedef fiyat: {target_price:,} TL
 cursor.close()
 connection.close()
 
-print("✅ Fiyat kontrolü tamamlandı.")
+
+print("\n✅ Fiyat kontrolü tamamlandı.")

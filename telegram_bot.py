@@ -296,7 +296,19 @@ async def handle_message(
 
 
             # ------------------------------------------
-            # ÜRÜNÜ SQL'DEN BUL
+            # KULLANICI İSTEĞİNİ ANALİZ ET
+            # ------------------------------------------
+
+            request_lower = product_name.lower()
+
+            wants_msi = "msi" in request_lower
+            wants_cyborg = "cyborg" in request_lower
+            wants_4050 = "4050" in request_lower
+            wants_4060 = "4060" in request_lower
+
+
+            # ------------------------------------------
+            # TÜM ÜRÜNLERİ SQL'DEN AL
             # ------------------------------------------
 
             cursor.execute("""
@@ -306,16 +318,59 @@ async def handle_message(
                     price,
                     gpu
                 FROM products
-                WHERE
-                    name LIKE ?
-                    OR gpu LIKE ?
-            """,
-                f"%{product_name}%",
-                "%RTX 4060%"
-            )
+            """)
+
+            all_rows = cursor.fetchall()
 
 
-            rows = cursor.fetchall()
+            # ------------------------------------------
+            # ÜRÜN ADAYLARINI FİLTRELE
+            # ------------------------------------------
+
+            rows = []
+
+
+            for row in all_rows:
+
+                name_lower = row.name.lower()
+                gpu_lower = (row.gpu or "").lower()
+
+
+                # MSI isteniyorsa MSI olmalı
+                if wants_msi:
+
+                    if "msi" not in name_lower:
+                        continue
+
+
+                # Cyborg isteniyorsa Cyborg olmalı
+                if wants_cyborg:
+
+                    if "cyborg" not in name_lower:
+                        continue
+
+
+                # RTX 4050 isteniyorsa 4050 olmalı
+                if wants_4050:
+
+                    if (
+                        "4050" not in name_lower
+                        and "4050" not in gpu_lower
+                    ):
+                        continue
+
+
+                # RTX 4060 isteniyorsa 4060 olmalı
+                if wants_4060:
+
+                    if (
+                        "4060" not in name_lower
+                        and "4060" not in gpu_lower
+                    ):
+                        continue
+
+
+                rows.append(row)
 
 
             print("🔎 SQL ürün adayları:")
@@ -338,37 +393,48 @@ async def handle_message(
             product = None
 
 
-            for row in rows:
+            # MSI + Cyborg + RTX4050
+            if (
+                wants_msi
+                and wants_cyborg
+                and wants_4050
+            ):
 
-                name_lower = row.name.lower()
-                request_lower = product_name.lower()
+                for row in rows:
 
+                    name_lower = row.name.lower()
 
-                if (
-                    "msi" in request_lower
-                    and "msi" in name_lower
-                ):
+                    if (
+                        "msi" in name_lower
+                        and "cyborg" in name_lower
+                        and "4050" in name_lower
+                    ):
 
-                    product = {
-                        "id": row.id,
-                        "name": row.name,
-                        "price": row.price
-                    }
+                        product = {
+                            "id": row.id,
+                            "name": row.name,
+                            "price": row.price
+                        }
 
-                    break
+                        break
 
 
             # ------------------------------------------
-            # MSI BULUNAMAZSA RTX 4060 ÜRÜNÜ BUL
+            # MSI + RTX4060
             # ------------------------------------------
 
             if product is None:
 
-                for row in rows:
+                if wants_msi and wants_4060:
 
-                    if row.gpu:
+                    for row in rows:
 
-                        if "4060" in row.gpu:
+                        name_lower = row.name.lower()
+
+                        if (
+                            "msi" in name_lower
+                            and "4060" in name_lower
+                        ):
 
                             product = {
                                 "id": row.id,
@@ -377,6 +443,46 @@ async def handle_message(
                             }
 
                             break
+
+
+            # ------------------------------------------
+            # GENEL MSI ÜRÜNÜ
+            # ------------------------------------------
+
+            if product is None:
+
+                if wants_msi:
+
+                    for row in rows:
+
+                        name_lower = row.name.lower()
+
+                        if "msi" in name_lower:
+
+                            product = {
+                                "id": row.id,
+                                "name": row.name,
+                                "price": row.price
+                            }
+
+                            break
+
+
+            # ------------------------------------------
+            # GENEL ÜRÜN
+            # ------------------------------------------
+
+            if product is None:
+
+                if rows:
+
+                    row = rows[0]
+
+                    product = {
+                        "id": row.id,
+                        "name": row.name,
+                        "price": row.price
+                    }
 
 
             print("🔎 Seçilen ürün:")
@@ -590,7 +696,9 @@ async def handle_message(
 
                 if tracked_products:
 
-                    final_answer = "📦 Takip ettiğiniz ürünler:\n\n"
+                    final_answer = (
+                        "📦 Takip ettiğiniz ürünler:\n\n"
+                    )
 
 
                     for product in tracked_products:
@@ -602,6 +710,7 @@ async def handle_message(
                             f"🎯 Hedef fiyat: "
                             f"{product['target_price']:,} TL\n\n"
                         )
+
 
                 else:
 
