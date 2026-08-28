@@ -1,21 +1,19 @@
 import os
-import asyncio
 import pyodbc
-
+import serpapi
 from dotenv import load_dotenv
-from telegram import Bot
-
 
 # ==================================================
-# ENV
+# ENV & API BAĞLANTISI
 # ==================================================
 
 load_dotenv()
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 
-bot = Bot(token=TELEGRAM_BOT_TOKEN)
-
+client = serpapi.Client(
+    api_key=SERPAPI_KEY
+)
 
 # ==================================================
 # SQL SERVER BAĞLANTISI
@@ -31,195 +29,193 @@ connection = pyodbc.connect(
 
 cursor = connection.cursor()
 
+print("SQL Server bağlantısı başarılı!")
 
 # ==================================================
-# TELEGRAM BİLDİRİM FONKSİYONU
-# ==================================================
-
-async def send_notification(chat_id, message):
-
-    await bot.send_message(
-        chat_id=chat_id,
-        text=message
-    )
-
-
-# ==================================================
-# TAKİP EDİLEN ÜRÜNLERİ GETİR
+# TAKİP EDİLEN ÜRÜNLERİ AL
 # ==================================================
 
 cursor.execute("""
-    SELECT
-        id,
-        product_id,
-        target_price,
-        chat_id,
-        active,
-        last_notified_price
-    FROM tracked_products
-    WHERE active = 1
+    SELECT DISTINCT
+        p.id,
+        p.name,
+        p.price,
+        p.gpu
+    FROM products p
+    INNER JOIN tracked_products tp
+        ON p.id = tp.product_id
+    WHERE tp.active = 1
 """)
 
-tracked_products = cursor.fetchall()
+products = cursor.fetchall()
 
-
-print("📦 Takip edilen ürün sayısı:", len(tracked_products))
-
+print(
+    f"📦 Güncellenecek aktif takip edilen ürün sayısı: "
+    f"{len(products)}"
+)
 
 # ==================================================
-# ÜRÜNLERİ KONTROL ET
+# ÜRÜNLERİ GÜNCELLE
 # ==================================================
 
-for tracked in tracked_products:
+for product in products:
 
-    tracking_id = tracked.id
-    product_id = tracked.product_id
-    target_price = tracked.target_price
-    chat_id = tracked.chat_id
-    last_notified_price = tracked.last_notified_price
+    product_id = product.id
+    product_name = product.name
+    current_price = product.price
+    gpu = product.gpu
 
+    print("\n------------------------------")
+    print("Ürün ID:", product_id)
+    print("Ürün:", product_name)
+    print("Mevcut Fiyat:", current_price)
+    print("GPU:", gpu)
 
     # ==================================================
-    # ÜRÜNÜN SON 2 FİYATINI AL
+    # SERPAPI ARAMASI
     # ==================================================
 
-    cursor.execute("""
-        SELECT TOP 2
-            price,
-            checked_at
-        FROM price_history
-        WHERE product_id = ?
-        ORDER BY checked_at DESC
-    """, product_id)
+    query = product_name
 
-    prices = cursor.fetchall()
+    print("🔎 SerpApi aranıyor:", query)
 
+    try:
+        results = client.search({
+            "engine": "google_shopping",
+            "q": query,
+            "hl": "tr",
+            "gl": "tr",
+            "num": 10
+        })
 
-    # Henüz yeterli fiyat geçmişi yoksa geç
-    if len(prices) < 2:
+        shopping_results = results.get(
+            "shopping_results",
+            []
+        )
+
+    except Exception as e:
+        print(f"❌ SerpApi Hatası: {e}")
+        continue
+
+    if not shopping_results:
+        print("❌ SerpApi'de ürün bulunamadı.")
+        continue
+
+    # ==================================================
+    # DOĞRU ÜRÜNÜ BUL
+    # ==================================================
+
+    new_price = None
+
+    normalized_product_name = product_name.lower()
+
+    words = [
+        w
+        for w in normalized_product_name.split()
+        if len(w) >= 4
+    ]
+
+    for result in shopping_results:
+
+        title = result.get("title")
+
+        if not title:
+            continue
+
+        normalized_title = title.lower()
+
+        match_count = 0
+
+        for word in words:
+            if word in normalized_title:
+                match_count += 1
+
+        required_matches = min(3, len(words))
+
+        if match_count >= required_matches:
+
+            price = result.get("extracted_price")
+
+            if price is not None:
+
+                new_price = price
+
+                print("✅ Eşleşen Ürün:", title)
+                print("💰 Yeni Fiyat:", new_price)
+
+                break
+
+    # ==================================================
+    # UYGUN ÜRÜN BULUNAMADI
+    # ==================================================
+
+    if new_price is None:
 
         print(
-            f"⚠️ Ürün ID {product_id} için "
-            f"yeterli fiyat geçmişi yok."
+            "❌ Uygun ürün eşleşmesi bulunamadı."
         )
 
         continue
 
-
-    new_price = prices[0].price
-    old_price = prices[1].price
-
-
-    print("------------------------------")
-    print(f"Ürün ID: {product_id}")
-    print(f"Eski fiyat: {old_price:,} TL")
-    print(f"Yeni fiyat: {new_price:,} TL")
-    print(f"Hedef fiyat: {target_price:,} TL")
-    print(f"Son bildirim fiyatı: {last_notified_price}")
-
-
     # ==================================================
-    # FİYAT DÜŞTÜ MÜ?
+    # PRICE HISTORY
     # ==================================================
 
-    if new_price < old_price:
+    try:
 
-        drop = old_price - new_price
-
-        print("📉 FİYAT DÜŞTÜ!")
-        print(f"Düşüş: {drop:,} TL")
-
-
-        # ==================================================
-        # HEDEF FİYATA ULAŞILDI MI?
-        # ==================================================
-
-        if new_price <= target_price:
-
-            print("🎯 HEDEF FİYATA ULAŞILDI!")
-
-
-            # ==================================================
-            # AYNI FİYAT İÇİN TEKRAR BİLDİRİM GÖNDERME
-            # ==================================================
-
-            if last_notified_price == new_price:
-
-                print(
-                    "⚠️ Bu fiyat için bildirim zaten gönderilmiş."
-                )
-
-                continue
-
-
-            # ==================================================
-            # TELEGRAM MESAJI
-            # ==================================================
-
-            message = (
-                "🚨 FİYAT ALARMI!\n\n"
-                f"Ürün ID: {product_id}\n\n"
-                f"📉 Eski fiyat: {old_price:,} TL\n"
-                f"💰 Yeni fiyat: {new_price:,} TL\n"
-                f"🎯 Hedef fiyat: {target_price:,} TL\n\n"
-                f"💵 Tasarruf: {drop:,} TL"
+        cursor.execute("""
+            INSERT INTO price_history
+            (
+                product_id,
+                price,
+                checked_at
             )
+            VALUES (?, ?, GETDATE())
+        """,
+            product_id,
+            float(new_price)
+        )
 
+    except Exception as e:
 
-            # ==================================================
-            # TELEGRAM BİLDİRİMİ
-            # ==================================================
+        print(
+            f"❌ Price history kaydı başarısız: {e}"
+        )
 
-            asyncio.run(
-                send_notification(
-                    chat_id,
-                    message
-                )
-            )
+        connection.rollback()
 
+        continue
 
-            print("📩 Telegram bildirimi gönderildi!")
+    # ==================================================
+    # PRODUCTS TABLOSUNDAKİ FİYATI GÜNCELLE
+    # ==================================================
 
+    cursor.execute("""
+        UPDATE products
+        SET price = ?
+        WHERE id = ?
+    """,
+        float(new_price),
+        product_id
+    )
 
-            # ==================================================
-            # SON BİLDİRİM FİYATINI KAYDET
-            # ==================================================
+    # ==================================================
+    # KAYDET
+    # ==================================================
 
-            cursor.execute("""
-                UPDATE tracked_products
-                SET last_notified_price = ?
-                WHERE id = ?
-            """,
-                new_price,
-                tracking_id
-            )
+    connection.commit()
 
-            connection.commit()
-
-
-            print(
-                "✅ Son bildirim fiyatı SQL'e kaydedildi."
-            )
-
-
-        else:
-
-            print(
-                "ℹ️ Fiyat düştü fakat henüz hedef fiyata ulaşmadı."
-            )
-
-
-    else:
-
-        print("➡️ Fiyat düşmedi.")
-
+    print(
+        "✅ Fiyat SQL Server'a kaydedildi!"
+    )
 
 # ==================================================
-# BAĞLANTILARI KAPAT
+# KAPAT
 # ==================================================
 
 cursor.close()
 connection.close()
 
-
-print("\n✅ Fiyat kontrolü tamamlandı.")
+print(
+    "\n🏁 Tüm aktif ürünlerin fiyat güncellemesi tamamlandı."
+)
