@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import pyodbc
 from dotenv import load_dotenv
@@ -41,7 +42,7 @@ def get_db_connection():
     )
 
 # ==================================================
-# YARDIMCI FONKSİYON: EN UYGUN LİNKİ VE MAĞAZAYI ÇIKAR
+# YARDIMCI FONKSİYONLAR: ÖZELLİK ÇIKARIMI & LİNK
 # ==================================================
 
 def extract_store_info(item: dict):
@@ -60,28 +61,99 @@ def extract_store_info(item: dict):
     prod_link = item.get("product_link")
     return store_name, (prod_link or direct_link or "")
 
+
+def parse_laptop_specs(title: str):
+    title_lower = title.lower()
+    
+    # 1. GPU
+    extracted_gpu = None
+    gpu_models = ["5090", "5080", "5070", "5060", "5050", "4090", "4080", "4070", "4060", "4050", "3050", "3060", "2050"]
+    for g in gpu_models:
+        if f"rtx {g}" in title_lower or f"rtx{g}" in title_lower:
+            extracted_gpu = f"RTX {g}"
+            break
+
+    # 2. RAM
+    extracted_ram = None
+    ram_match = re.search(r'\b(8|16|24|32|64)\s*gb\b(?!\s*ssd|\s*m\.2)', title_lower)
+    if ram_match:
+        extracted_ram = f"{ram_match.group(1)} GB"
+
+    # 3. Storage (SSD / HDD)
+    extracted_storage = None
+    storage_match = re.search(r'\b(256\s*gb|512\s*gb|1\s*tb|2\s*tb)\s*(?:ssd|m\.2|nvme)?\b', title_lower)
+    if storage_match:
+        val = storage_match.group(1).upper().replace(" ", "")
+        extracted_storage = f"{val[:-2]} {val[-2:]}"
+
+    # 4. CPU
+    extracted_cpu = None
+    cpu_intel = re.search(r'\b(i[3579]-?\d{4,5}[a-z]{0,2}|ultra\s*[579]\s*\d{3}[a-z]?)\b', title_lower)
+    cpu_amd = re.search(r'\b(ryzen\s*[3579]\s*\d{4}[a-z]{0,2})\b', title_lower)
+    if cpu_intel:
+        extracted_cpu = cpu_intel.group(0).upper().replace("I", "i", 1)
+    elif cpu_amd:
+        extracted_cpu = cpu_amd.group(0).title()
+
+    # 5. Refresh Rate (Hz)
+    extracted_hz = None
+    hz_match = re.search(r'\b(60|120|144|165|240|300|360)\s*hz\b', title_lower)
+    if hz_match:
+        extracted_hz = int(hz_match.group(1))
+
+    # 6. Screen Size
+    extracted_screen = None
+    screen_match = re.search(r'\b(13\.3|14|15\.6|16|16\.1|17|17\.3)\s*(?:\'\'|\"|\s*in[cç]|\s*fhd|\s*qhd)?\b', title_lower)
+    if screen_match:
+        extracted_screen = f"{screen_match.group(1)}\""
+
+    return {
+        "gpu": extracted_gpu,
+        "ram": extracted_ram,
+        "storage": extracted_storage,
+        "cpu": extracted_cpu,
+        "refresh_rate": extracted_hz,
+        "screen_size": extracted_screen
+    }
+
 # ==================================================
 # SERPAPI + SQL CANLI ARAMA VE KAYIT FONKSİYONU
 # ==================================================
 
-def fetch_and_save_products(query: str = None, gpu: str = None, ram: str = None, min_price: int = None, max_price: int = None, limit: int = 10):
+def fetch_and_save_products(
+    query: str = None, 
+    gpu: str = None, 
+    ram: str = None, 
+    storage: str = None, 
+    cpu: str = None, 
+    refresh_rate: int = None, 
+    screen_size: str = None, 
+    min_price: int = None, 
+    max_price: int = None, 
+    limit: int = 10
+):
     conn = get_db_connection()
     cursor = conn.cursor()
 
     search_keywords = []
     if query and query.lower().strip() not in ["laptop", "gaming laptop", "bilgisayar"]:
         search_keywords.append(query)
+    if cpu:
+        search_keywords.append(cpu)
     if gpu:
         search_keywords.append(gpu)
     if ram:
         search_keywords.append(ram)
-    
+    if storage:
+        search_keywords.append(storage)
+    if refresh_rate:
+        search_keywords.append(f"{refresh_rate}Hz")
+
     serp_query = " ".join(search_keywords) if search_keywords else "gaming laptop"
-    if "laptop" not in serp_query.lower():
+    if "laptop" not in serp_query.lower() and "notebook" not in serp_query.lower():
         serp_query += " laptop"
 
-    # Kullanıcı daha fazla ürün istiyorsa SerpApi num değerini de artırıyoruz
-    serp_num = max(25, limit * 2)
+    serp_num = max(40, limit * 4)
     print(f"🌐 SerpApi Google Shopping aranıyor: '{serp_query}' | Limit: {limit}")
 
     serp_params = {
@@ -99,48 +171,72 @@ def fetch_and_save_products(query: str = None, gpu: str = None, ram: str = None,
         print(f"❌ SerpApi Hatası: {e}")
         shopping_results = []
 
-    # 2. Ürünleri SQL Server'a Kaydetme / Güncelleme
+    # 1. Yurt dışı, ithalat ve yenilenmiş/2.el ağırlıklı aracı mağazalar
+    BANNED_SOURCES = [
+        "amerikasepetim", "gshopper", "aliexpress", "temu", "ubuy", 
+        "fruugo", "desertcart", "tiendamia", "fishpond", "ebay",
+        "ciceksepeti", "çiçeksepeti", "easycep", "getmobil", "yenilenmis",
+        "sahibinden", "letgo", "dolap", "gardrops"
+    ]
+
+    # 2. İkinci el, yenilenmiş, teşhir, masaüstü ve aksesuar kelimeleri
+    BLACKLIST_WORDS = [
+        "ikinci el", "2. el", "2.el", "2.el.", "yenilenmiş", "refurbished", "outlet",
+        "teşhir", "kullanılmış", "revizyon", "tamirli",
+        "masaüstü", "kasa", "toplama", "hazır sistem", "monitör", "sıvı soğutma",
+        "çanta", "adaptör", "klavye", "kulaklık", "stand", "soğutucu"
+    ]
+
     for item in shopping_results:
-        title = item.get("title")
+        title = item.get("title", "")
         price = item.get("extracted_price")
+        source = item.get("source", "").lower()
         store_name, link = extract_store_info(item)
 
         if not title or price is None:
             continue
 
-        extracted_gpu = None
-        for g in ["5090", "5080", "5070", "5060", "5050", "4090", "4080", "4070", "4060", "4050", "3050", "3060", "2050"]:
-            if f"rtx {g}" in title.lower() or f"rtx{g}" in title.lower() or g in title:
-                extracted_gpu = f"RTX {g}"
-                break
+        # Mağaza kara liste kontrolü
+        if any(banned in source for banned in BANNED_SOURCES) or any(banned in link.lower() for banned in BANNED_SOURCES):
+            continue
 
-        extracted_ram = None
-        for r in ["8 gb", "16 gb", "32 gb", "64 gb", "8gb", "16gb", "32gb", "64gb"]:
-            if r in title.lower():
-                extracted_ram = r.upper().replace("GB", " GB")
-                break
+        # Döviz kuru çevirisi olan ithalat ürünlerini ele
+        if "alternative_price" in item and item["alternative_price"].get("currency") in ["$", "€", "£"]:
+            continue
+
+        title_lower = title.lower()
+
+        # Başlıkta yasaklı kelime kontrolü
+        if any(bad_word in title_lower for bad_word in BLACKLIST_WORDS):
+            continue
+
+        specs = parse_laptop_specs(title)
 
         cursor.execute("SELECT id FROM products WHERE name = ?", (title,))
         existing = cursor.fetchone()
 
         if existing:
             product_id = existing[0]
-            cursor.execute("UPDATE products SET price = ?, url = ? WHERE id = ?", (price, link, product_id))
+            cursor.execute("""
+                UPDATE products 
+                SET price = ?, url = ?, gpu = ?, ram = ?, storage = ?, cpu = ?, refresh_rate = ?, screen_size = ?
+                WHERE id = ?
+            """, (price, link, specs["gpu"], specs["ram"], specs["storage"], specs["cpu"], specs["refresh_rate"], specs["screen_size"], product_id))
         else:
             try:
                 cursor.execute("""
-                    INSERT INTO products (name, price, url, gpu, ram, storage)
+                    INSERT INTO products (name, price, url, gpu, ram, storage, cpu, refresh_rate, screen_size)
                     OUTPUT INSERTED.id
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, (title, price, link, extracted_gpu, extracted_ram, None))
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (title, price, link, specs["gpu"], specs["ram"], specs["storage"], specs["cpu"], specs["refresh_rate"], specs["screen_size"]))
                 product_id = cursor.fetchone()[0]
             except Exception:
                 cursor.execute("SELECT ISNULL(MAX(id), 0) + 1 FROM products")
                 next_id = cursor.fetchone()[0]
                 cursor.execute("""
-                    INSERT INTO products (id, name, price, url, gpu, ram, storage)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (next_id, title, price, link, extracted_gpu, extracted_ram, None))
+                    INSERT INTO products (id, name, price, url, gpu, ram, storage, cpu, refresh_rate, screen_size)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (next_id, title, price, link, specs["gpu"], specs["ram"], specs["storage"], specs["cpu"], specs["refresh_rate"], specs["screen_size"]))
                 product_id = next_id
 
         try:
@@ -158,9 +254,14 @@ def fetch_and_save_products(query: str = None, gpu: str = None, ram: str = None,
 
     conn.commit()
 
-    # 3. İstenen Kriterlere ve Limite Göre Veritabanından Sonuçları Çekme
+    # İstenen kriterlere göre veritabanından çek
     final_limit = limit if limit and limit > 0 else 10
-    sql = f"SELECT TOP {final_limit} id, name, price, url, gpu, ram FROM products WHERE 1=1"
+    sql = f"""
+        SELECT TOP {final_limit} 
+            id, name, price, url, gpu, ram, storage, cpu, refresh_rate, screen_size 
+        FROM products 
+        WHERE 1=1
+    """
     params = []
 
     if min_price is not None:
@@ -179,10 +280,26 @@ def fetch_and_save_products(query: str = None, gpu: str = None, ram: str = None,
         sql += " AND (ram LIKE ? OR name LIKE ?)"
         params.extend([f"%{ram}%", f"%{ram}%"])
 
+    if storage:
+        sql += " AND (storage LIKE ? OR name LIKE ?)"
+        params.extend([f"%{storage}%", f"%{storage}%"])
+
+    if cpu:
+        sql += " AND (cpu LIKE ? OR name LIKE ?)"
+        params.extend([f"%{cpu}%", f"%{cpu}%"])
+
+    if refresh_rate:
+        sql += " AND refresh_rate >= ?"
+        params.append(refresh_rate)
+
+    if screen_size:
+        sql += " AND (screen_size LIKE ? OR name LIKE ?)"
+        params.extend([f"%{screen_size}%", f"%{screen_size}%"])
+
     if query and query.lower().strip() not in ["laptop", "gaming laptop", "bilgisayar"]:
         words = query.strip().split()
         for word in words:
-            if word.lower() not in ["laptop", "gaming"]:
+            if word.lower() not in ["laptop", "gaming", "notebook"]:
                 sql += " AND name LIKE ?"
                 params.append(f"%{word}%")
 
@@ -199,7 +316,11 @@ def fetch_and_save_products(query: str = None, gpu: str = None, ram: str = None,
             "price": row.price,
             "url": row.url or "",
             "gpu": row.gpu or "Belirtilmemiş",
-            "ram": row.ram or "Belirtilmemiş"
+            "ram": row.ram or "Belirtilmemiş",
+            "storage": row.storage or "Belirtilmemiş",
+            "cpu": row.cpu or "Belirtilmemiş",
+            "refresh_rate": f"{row.refresh_rate} Hz" if row.refresh_rate else "Belirtilmemiş",
+            "screen_size": row.screen_size or "Belirtilmemiş"
         })
 
     cursor.close()
@@ -211,6 +332,10 @@ def fetch_and_save_products(query: str = None, gpu: str = None, ram: str = None,
             "max_price": max_price,
             "gpu": gpu,
             "ram": ram,
+            "storage": storage,
+            "cpu": cpu,
+            "refresh_rate": refresh_rate,
+            "screen_size": screen_size,
             "limit": final_limit
         },
         "products": filtered_products
@@ -360,37 +485,33 @@ Sen akıllı bir AI Fiyat Takip ve Alışveriş Danışmanısın.
 
 Kullanıcının isteğini analiz et ve kriterleri search_products tool'una aktar.
 
-FİYAT KURALLARI:
-- "50k", "50 bin", "50.000 TL" = 50000 TL
-- "50k altı" = max_price: 50000
-- "30-55 bin arası" = min_price: 30000, max_price: 55000
-- "55 bin civarı" = min_price: 50000, max_price: 60000
-
-DONANIM KURALLARI:
-- "RTX 4060" -> gpu: "RTX 4060"
-- "RTX 5050" -> gpu: "RTX 5050"
-- "16 GB RAM" -> ram: "16 GB"
-
-SONUÇ SAYISI / LİMİT:
-- Kullanıcı "10 tane göster", "daha fazla listele", "15 sonuç getir" gibi adet belirtirse limit parametresini ayarla. Belirtilmezse varsayılan 10'dur.
+PARAMETRE KURALLARI:
+- Fiyatlar: "50k altı" -> max_price: 50000, "30-55k arası" -> min_price: 30000, max_price: 55000
+- GPU: "RTX 4060", "RTX 5050"
+- RAM: "16 GB", "32 GB"
+- Storage: "512 GB", "1 TB"
+- CPU: "i7-13700H", "Ryzen 7 8845HS", "i5"
+- Refresh Rate: "144 Hz" -> refresh_rate: 144, "165 Hz" -> refresh_rate: 165
+- Screen: "15.6", "16.1", "17.3"
 
 CEVAP VE LİNK BİÇİMLENDİRME KURALLARI:
-1. Gelen bütün ürünleri eksiksiz listele.
-2. Her ürünün linkini [Ürünü İncele](URL) formatında tıklanabilir olarak ekle.
-3. Fiyatları Türkçe para birimi formatında sun (Örn: 40.999 TL).
-4. Liste maddelerinde Ürün Adı, Fiyat, GPU, RAM ve İnceleme Linki yer alsın.
+1. Gelen ürünleri net ve okunaklı numaralı liste olarak sun.
+2. Her ürünün altına Fiyat, GPU, CPU, RAM, SSD, Hz ve Ekran Boyutunu ekle.
+3. Linkleri [Ürünü İncele](URL) formatında tıklanabilir yap.
+4. Fiyatları Türkçe para birimi formatında sun (Örn: 42.500 TL).
+5. Asla ikinci el, yenilenmiş veya yurt dışı ürün önerme.
 """
 
 search_products_tool = {
     "type": "function",
     "name": "search_products",
-    "description": "Google Shopping üzerinde canlı ürün araması yapar, veritabanına kaydeder ve kriterlere uyanları listeler.",
+    "description": "Google Shopping üzerinde detaylı kriterlerle (GPU, CPU, RAM, SSD, Hz, Ekran vb.) canlı sıfır ürün araması yapar.",
     "parameters": {
         "type": "object",
         "properties": {
             "query": {
                 "type": "string",
-                "description": "Model, marka veya genel arama adı (örn: Lenovo LOQ, MSI)."
+                "description": "Model, marka veya genel arama adı (örn: Lenovo LOQ, MSI Katana)."
             },
             "gpu": {
                 "type": "string",
@@ -399,6 +520,22 @@ search_products_tool = {
             "ram": {
                 "type": "string",
                 "description": "RAM miktarı (örn: 16 GB, 32 GB)."
+            },
+            "storage": {
+                "type": "string",
+                "description": "Depolama alanı (örn: 512 GB, 1 TB)."
+            },
+            "cpu": {
+                "type": "string",
+                "description": "İşlemci modeli veya serisi (örn: i7, Ryzen 7, i5-13420H)."
+            },
+            "refresh_rate": {
+                "type": "integer",
+                "description": "Minimum ekran yenileme hızı (Hz cinsinden, örn: 144, 165)."
+            },
+            "screen_size": {
+                "type": "string",
+                "description": "Ekran boyutu (örn: 15.6, 16, 17.3)."
             },
             "min_price": {
                 "type": "integer",
@@ -410,7 +547,7 @@ search_products_tool = {
             },
             "limit": {
                 "type": "integer",
-                "description": "Listelenecek maksimum ürün sayısı (varsayılan: 10)."
+                "description": "Listelenecek maksimum ürün sayısı."
             }
         },
         "required": []
@@ -478,13 +615,13 @@ ALL_TOOLS = [
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     welcome_text = (
-        "🤖 **AI Canlı Fiyat Takip Botu Hazır!**\n\n"
+        "🤖 **Gelişmiş AI Laptop Takip Danışmanı Hazır!**\n\n"
         f"📍 Chat ID: `{chat_id}`\n\n"
         "Örnek komutlar:\n"
-        "• *30-55 bin arası RTX 5050 laptop bul (10 tane)*\n"
-        "• *55 bin civarı 16 GB RAM RTX 4060 MSI laptop bul*\n"
+        "• *32 GB RAM, 1 TB SSD, RTX 4060, 144 Hz sıfır laptop bul*\n"
+        "• *50k altı Ryzen 7 16 GB RTX 4060 laptop göster*\n"
         "• *Acer Nitro modelini 39.000 TL olunca takip et*\n"
-        "• *Takip ettiğim ürünleri göster*"
+        "• *Takip listemi göster*"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
@@ -520,6 +657,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         query=args.get("query"),
                         gpu=args.get("gpu"),
                         ram=args.get("ram"),
+                        storage=args.get("storage"),
+                        cpu=args.get("cpu"),
+                        refresh_rate=args.get("refresh_rate"),
+                        screen_size=args.get("screen_size"),
                         min_price=args.get("min_price"),
                         max_price=args.get("max_price"),
                         limit=args.get("limit", 10)
@@ -579,5 +720,5 @@ app.add_handler(CommandHandler("start", start))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 if __name__ == "__main__":
-    print("🤖 Canlı SerpApi + Gemini Telegram Botu Başlatıldı...")
+    print("🤖 Gelişmiş Donanım Destekli Telegram Botu Başlatıldı...")
     app.run_polling()
