@@ -15,6 +15,9 @@ from telegram.ext import (
     ContextTypes
 )
 
+# Analiz ve Grafik Motoru
+from analysis import analyze_by_name, generate_price_chart
+
 # ==================================================
 # ENV & API BAĞLANTILARI
 # ==================================================
@@ -171,7 +174,6 @@ def fetch_and_save_products(
         print(f"❌ SerpApi Hatası: {e}")
         shopping_results = []
 
-    # 1. Yurt dışı, ithalat ve yenilenmiş/2.el ağırlıklı aracı mağazalar
     BANNED_SOURCES = [
         "amerikasepetim", "gshopper", "aliexpress", "temu", "ubuy", 
         "fruugo", "desertcart", "tiendamia", "fishpond", "ebay",
@@ -179,7 +181,6 @@ def fetch_and_save_products(
         "sahibinden", "letgo", "dolap", "gardrops"
     ]
 
-    # 2. İkinci el, yenilenmiş, teşhir, masaüstü ve aksesuar kelimeleri
     BLACKLIST_WORDS = [
         "ikinci el", "2. el", "2.el", "2.el.", "yenilenmiş", "refurbished", "outlet",
         "teşhir", "kullanılmış", "revizyon", "tamirli",
@@ -196,17 +197,13 @@ def fetch_and_save_products(
         if not title or price is None:
             continue
 
-        # Mağaza kara liste kontrolü
         if any(banned in source for banned in BANNED_SOURCES) or any(banned in link.lower() for banned in BANNED_SOURCES):
             continue
 
-        # Döviz kuru çevirisi olan ithalat ürünlerini ele
         if "alternative_price" in item and item["alternative_price"].get("currency") in ["$", "€", "£"]:
             continue
 
         title_lower = title.lower()
-
-        # Başlıkta yasaklı kelime kontrolü
         if any(bad_word in title_lower for bad_word in BLACKLIST_WORDS):
             continue
 
@@ -254,7 +251,6 @@ def fetch_and_save_products(
 
     conn.commit()
 
-    # İstenen kriterlere göre veritabanından çek
     final_limit = limit if limit and limit > 0 else 10
     sql = f"""
         SELECT TOP {final_limit} 
@@ -483,7 +479,7 @@ def db_untrack_product(product_name: str, chat_id: int):
 SYSTEM_INSTRUCTION = """
 Sen akıllı bir AI Fiyat Takip ve Alışveriş Danışmanısın.
 
-Kullanıcının isteğini analiz et ve kriterleri search_products tool'una aktar.
+Kullanıcının isteğini analiz et ve kriterleri uygun tool'lara aktar.
 
 PARAMETRE KURALLARI:
 - Fiyatlar: "50k altı" -> max_price: 50000, "30-55k arası" -> min_price: 30000, max_price: 55000
@@ -493,6 +489,10 @@ PARAMETRE KURALLARI:
 - CPU: "i7-13700H", "Ryzen 7 8845HS", "i5"
 - Refresh Rate: "144 Hz" -> refresh_rate: 144, "165 Hz" -> refresh_rate: 165
 - Screen: "15.6", "16.1", "17.3"
+
+FİYAT ANALİZİ YORUMLAMA:
+- analyze_price tool'u çalıştığında; ilk fiyat, güncel fiyat, en düşük, en yüksek ve ortalama fiyatı kullanıcının anlayacağı profesyonel bir rapor gibi sun.
+- Değişim yüzdesini belirt. Fiyat düşmüşse avantajlı olduğunu, artmışsa beklemesi gerektiğini tavsiye et.
 
 CEVAP VE LİNK BİÇİMLENDİRME KURALLARI:
 1. Gelen ürünleri net ve okunaklı numaralı liste olarak sun.
@@ -505,50 +505,20 @@ CEVAP VE LİNK BİÇİMLENDİRME KURALLARI:
 search_products_tool = {
     "type": "function",
     "name": "search_products",
-    "description": "Google Shopping üzerinde detaylı kriterlerle (GPU, CPU, RAM, SSD, Hz, Ekran vb.) canlı sıfır ürün araması yapar.",
+    "description": "Google Shopping üzerinde detaylı kriterlerle canlı sıfır ürün araması yapar.",
     "parameters": {
         "type": "object",
         "properties": {
-            "query": {
-                "type": "string",
-                "description": "Model, marka veya genel arama adı (örn: Lenovo LOQ, MSI Katana)."
-            },
-            "gpu": {
-                "type": "string",
-                "description": "Ekran kartı modeli (örn: RTX 4060, RTX 5050)."
-            },
-            "ram": {
-                "type": "string",
-                "description": "RAM miktarı (örn: 16 GB, 32 GB)."
-            },
-            "storage": {
-                "type": "string",
-                "description": "Depolama alanı (örn: 512 GB, 1 TB)."
-            },
-            "cpu": {
-                "type": "string",
-                "description": "İşlemci modeli veya serisi (örn: i7, Ryzen 7, i5-13420H)."
-            },
-            "refresh_rate": {
-                "type": "integer",
-                "description": "Minimum ekran yenileme hızı (Hz cinsinden, örn: 144, 165)."
-            },
-            "screen_size": {
-                "type": "string",
-                "description": "Ekran boyutu (örn: 15.6, 16, 17.3)."
-            },
-            "min_price": {
-                "type": "integer",
-                "description": "Minimum bütçe (TL)."
-            },
-            "max_price": {
-                "type": "integer",
-                "description": "Maksimum bütçe (TL)."
-            },
-            "limit": {
-                "type": "integer",
-                "description": "Listelenecek maksimum ürün sayısı."
-            }
+            "query": {"type": "string", "description": "Model, marka veya genel arama adı."},
+            "gpu": {"type": "string", "description": "Ekran kartı modeli."},
+            "ram": {"type": "string", "description": "RAM miktarı."},
+            "storage": {"type": "string", "description": "Depolama alanı."},
+            "cpu": {"type": "string", "description": "İşlemci modeli veya serisi."},
+            "refresh_rate": {"type": "integer", "description": "Minimum ekran yenileme hızı (Hz)."},
+            "screen_size": {"type": "string", "description": "Ekran boyutu."},
+            "min_price": {"type": "integer", "description": "Minimum bütçe (TL)."},
+            "max_price": {"type": "integer", "description": "Maksimum bütçe (TL)."},
+            "limit": {"type": "integer", "description": "Listelenecek maksimum ürün sayısı."}
         },
         "required": []
     }
@@ -561,14 +531,8 @@ track_product_tool = {
     "parameters": {
         "type": "object",
         "properties": {
-            "product_name": {
-                "type": "string",
-                "description": "Takip edilecek ürünün adı veya modeli."
-            },
-            "target_price": {
-                "type": "integer",
-                "description": "Hedef fiyat (TL)."
-            }
+            "product_name": {"type": "string", "description": "Takip edilecek ürünün adı veya modeli."},
+            "target_price": {"type": "integer", "description": "Hedef fiyat (TL)."}
         },
         "required": ["product_name", "target_price"]
     }
@@ -592,10 +556,20 @@ untrack_product_tool = {
     "parameters": {
         "type": "object",
         "properties": {
-            "product_name": {
-                "type": "string",
-                "description": "Takipten çıkarılacak ürünün adı."
-            }
+            "product_name": {"type": "string", "description": "Takipten çıkarılacak ürünün adı."}
+        },
+        "required": ["product_name"]
+    }
+}
+
+analyze_price_tool = {
+    "type": "function",
+    "name": "analyze_price",
+    "description": "Veritabanındaki bir ürünün geçmiş fiyat hareketlerini, min/max/ortalama fiyatlarını ve değişim yüzdesini analiz eder.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "product_name": {"type": "string", "description": "Fiyat geçmişi analiz edilecek ürünün adı veya modeli."}
         },
         "required": ["product_name"]
     }
@@ -605,8 +579,60 @@ ALL_TOOLS = [
     search_products_tool,
     track_product_tool,
     get_tracked_products_tool,
-    untrack_product_tool
+    untrack_product_tool,
+    analyze_price_tool
 ]
+
+# ==================================================
+# OTOMATİK ARKA PLAN FİYAT KONTROL GÖREVİ (JOBQUEUE)
+# ==================================================
+
+async def auto_price_check(context: ContextTypes.DEFAULT_TYPE):
+    print("⏰ [Zamanlayıcı] Takip edilen ürünler taranıyor...")
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+            SELECT tp.id, tp.chat_id, tp.target_price, p.id, p.name, p.price, p.url
+            FROM tracked_products tp
+            JOIN products p ON tp.product_id = p.id
+            WHERE tp.active = 1
+        """)
+        tracked_items = cursor.fetchall()
+
+        for item in tracked_items:
+            track_id = item[0]
+            chat_id = item[1]
+            target_price = item[2]
+            product_id = item[3]
+            product_name = item[4]
+            current_price = item[5]
+            product_url = item[6]
+
+            if current_price <= target_price:
+                alert_text = (
+                    f"🔥 **FİYAT ALARMI!**\n\n"
+                    f"💻 **Ürün:** {product_name}\n"
+                    f"🎯 **Hedef Fiyatınız:** {target_price:,.0f} TL\n"
+                    f"💰 **Mevcut Fiyat:** {current_price:,.0f} TL\n\n"
+                    f"🔗 [Ürünü Satın Al]({product_url})"
+                )
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=alert_text,
+                        parse_mode="Markdown"
+                    )
+                    print(f"🔔 Bildirim gönderildi: {chat_id} -> {product_name}")
+                except Exception as e:
+                    print(f"❌ Bildirim gönderme hatası: {e}")
+
+    except Exception as e:
+        print(f"❌ Zamanlayıcı SQL hatası: {e}")
+    finally:
+        cursor.close()
+        conn.close()
 
 # ==================================================
 # TELEGRAM BOT HANDLERS
@@ -615,12 +641,12 @@ ALL_TOOLS = [
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     welcome_text = (
-        "🤖 **Gelişmiş AI Laptop Takip Danışmanı Hazır!**\n\n"
+        "🤖 **Gelişmiş AI Laptop Takip & Analiz Danışmanı Hazır!**\n\n"
         f"📍 Chat ID: `{chat_id}`\n\n"
         "Örnek komutlar:\n"
-        "• *32 GB RAM, 1 TB SSD, RTX 4060, 144 Hz sıfır laptop bul*\n"
-        "• *50k altı Ryzen 7 16 GB RTX 4060 laptop göster*\n"
-        "• *Acer Nitro modelini 39.000 TL olunca takip et*\n"
+        "• *32 GB RAM, RTX 4060 laptop bul*\n"
+        "• *Acer Nitro fiyat analizini göster*\n"
+        "• *ERAZER modelini 35.000 TL olunca takip et*\n"
         "• *Takip listemi göster*"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
@@ -651,6 +677,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 print(f"🤖 Tool: {tool_name} | Parametreler: {args}")
 
                 result = {}
+                chart_product_id = None
 
                 if tool_name == "search_products":
                     result = fetch_and_save_products(
@@ -682,6 +709,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         chat_id=chat_id
                     )
 
+                elif tool_name == "analyze_price":
+                    result = analyze_by_name(
+                        product_name=args.get("product_name", "")
+                    )
+                    # Analiz başarılıysa grafik çizmek için ID'yi yakala
+                    if result.get("success") and "product_id" in result:
+                        chart_product_id = result["product_id"]
+
                 final_interaction = gemini_client.interactions.create(
                     model="gemini-3.6-flash",
                     previous_interaction_id=interaction.id,
@@ -696,11 +731,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     system_instruction=SYSTEM_INSTRUCTION
                 )
 
-                final_text = final_interaction.output_text or "Sonuçlar listelendi."
+                final_text = final_interaction.output_text or "İşlem tamamlandı."
                 try:
                     await update.message.reply_text(final_text, parse_mode="Markdown")
                 except Exception:
                     await update.message.reply_text(final_text)
+
+                # Eğer analiz tool'u çağrıldıysa analiz metninin altına fiyat grafiğini at
+                if chart_product_id:
+                    try:
+                        chart_buf = generate_price_chart(chart_product_id)
+                        if chart_buf:
+                            await update.message.reply_photo(
+                                photo=chart_buf,
+                                caption="📈 Fiyat Trend Grafiği"
+                            )
+                    except Exception as e:
+                        print(f"❌ Grafik gönderme hatası: {e}")
+
                 return
 
         if not has_tool_call:
@@ -716,9 +764,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==================================================
 
 app = Application.builder().token(TELEGRAM_TOKEN).build()
+
 app.add_handler(CommandHandler("start", start))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
+job_queue = app.job_queue
+job_queue.run_repeating(auto_price_check, interval=1800, first=10)
+
 if __name__ == "__main__":
-    print("🤖 Gelişmiş Donanım Destekli Telegram Botu Başlatıldı...")
+    print("🤖 Gelişmiş Donanım Destekli Telegram Botu ve Zamanlayıcı Başlatıldı...")
     app.run_polling()
