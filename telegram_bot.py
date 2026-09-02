@@ -472,12 +472,66 @@ def db_untrack_product(product_name: str, chat_id: int):
         "product_id": target_item.product_id
     }
 
+
+# ==================================================
+# 5. GÜN: İKİ ÜRÜNÜ KARŞILAŞTIRMA FONKSİYONU
+# ==================================================
+
+def db_compare_products(product_1: str, product_2: str):
+    """
+    Veritabanından iki farklı modelin donanım ve fiyat bilgilerini çeker.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    def find_one(p_name):
+        words = p_name.strip().split()
+        sql = "SELECT TOP 1 id, name, price, gpu, cpu, ram, storage, refresh_rate, screen_size, url FROM products WHERE 1=1"
+        params = []
+        for word in words:
+            if len(word) > 2:
+                sql += " AND name LIKE ?"
+                params.append(f"%{word}%")
+        cursor.execute(sql, params)
+        return cursor.fetchone()
+
+    p1_row = find_one(product_1)
+    p2_row = find_one(product_2)
+
+    cursor.close()
+    conn.close()
+
+    if not p1_row:
+        return {"success": False, "message": f"'{product_1}' veritabanında bulunamadı. Lütfen önce aratın."}
+    if not p2_row:
+        return {"success": False, "message": f"'{product_2}' veritabanında bulunamadı. Lütfen önce aratın."}
+
+    def format_prod(r):
+        return {
+            "id": r.id,
+            "name": r.name,
+            "price": r.price,
+            "gpu": r.gpu or "Belirtilmemiş",
+            "cpu": r.cpu or "Belirtilmemiş",
+            "ram": r.ram or "Belirtilmemiş",
+            "storage": r.storage or "Belirtilmemiş",
+            "refresh_rate": f"{r.refresh_rate} Hz" if r.refresh_rate else "Belirtilmemiş",
+            "screen_size": r.screen_size or "Belirtilmemiş",
+            "url": r.url or ""
+        }
+
+    return {
+        "success": True,
+        "product_1": format_prod(p1_row),
+        "product_2": format_prod(p2_row)
+    }
+
 # ==================================================
 # SYSTEM INSTRUCTION & TOOLS
 # ==================================================
 
 SYSTEM_INSTRUCTION = """
-Sen akıllı bir AI Fiyat Takip ve Alışveriş Danışmanısın.
+Sen akıllı bir AI Donanım ve Fiyat Takip Danışmanısın.
 
 Kullanıcının isteğini analiz et ve kriterleri uygun tool'lara aktar.
 
@@ -488,18 +542,19 @@ PARAMETRE KURALLARI:
 - Storage: "512 GB", "1 TB"
 - CPU: "i7-13700H", "Ryzen 7 8845HS", "i5"
 - Refresh Rate: "144 Hz" -> refresh_rate: 144, "165 Hz" -> refresh_rate: 165
-- Screen: "15.6", "16.1", "17.3"
 
-FİYAT ANALİZİ YORUMLAMA:
-- analyze_price tool'u çalıştığında; ilk fiyat, güncel fiyat, en düşük, en yüksek ve ortalama fiyatı kullanıcının anlayacağı profesyonel bir rapor gibi sun.
-- Değişim yüzdesini belirt. Fiyat düşmüşse avantajlı olduğunu, artmışsa beklemesi gerektiğini tavsiye et.
+KARŞILAŞTIRMA (compare_products) KURALLARI:
+- compare_products çağrıldığında iki ürünü yan yana koyup teknik donanımlarını (İşlemci gücü, Ekran kartı, RAM, Hz ve Ekran boyutu) ve Fiyatlarını kıyasla.
+- Hangisinin işlemcisinin/ekran kartının daha üstün olduğunu belirt.
+- Fiyat farkına değip değmeyeceğini analiz et ve net bir "🏆 Hangisi Tercih Edilmeli?" sonucu ver.
+- Her iki ürünün de satın alma linklerini ekle.
 
-CEVAP VE LİNK BİÇİMLENDİRME KURALLARI:
-1. Gelen ürünleri net ve okunaklı numaralı liste olarak sun.
-2. Her ürünün altına Fiyat, GPU, CPU, RAM, SSD, Hz ve Ekran Boyutunu ekle.
-3. Linkleri [Ürünü İncele](URL) formatında tıklanabilir yap.
-4. Fiyatları Türkçe para birimi formatında sun (Örn: 42.500 TL).
-5. Asla ikinci el, yenilenmiş veya yurt dışı ürün önerme.
+FİYAT ANALİZİ (analyze_price) KURALLARI:
+- analyze_price çağrıldığında ilk fiyat, güncel fiyat, dip, tepe, ortalama ve % değişim değerlerini sunup mantıklı bir alışveriş tavsiyesi ver.
+
+CEVAP BİÇİMLENDİRME:
+- Linkleri [Ürünü İncele](URL) formatında tıklanabilir yap.
+- Fiyatları Türkçe para birimi formatında sun (Örn: 42.500 TL).
 """
 
 search_products_tool = {
@@ -565,7 +620,7 @@ untrack_product_tool = {
 analyze_price_tool = {
     "type": "function",
     "name": "analyze_price",
-    "description": "Veritabanındaki bir ürünün geçmiş fiyat hareketlerini, min/max/ortalama fiyatlarını ve değişim yüzdesini analiz eder.",
+    "description": "Veritabanındaki bir ürünün geçmiş fiyat hareketlerini, min/max/ortalama fiyatlarını analiz eder.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -575,12 +630,27 @@ analyze_price_tool = {
     }
 }
 
+compare_products_tool = {
+    "type": "function",
+    "name": "compare_products",
+    "description": "Kullanıcının karşılaştırmak istediği iki farklı laptop modelini donanım özellikleri ve fiyatları açısından kıyaslar.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "product_1": {"type": "string", "description": "Birinci laptop modelinin adı veya anahtar kelimesi."},
+            "product_2": {"type": "string", "description": "İkinci laptop modelinin adı veya anahtar kelimesi."}
+        },
+        "required": ["product_1", "product_2"]
+    }
+}
+
 ALL_TOOLS = [
     search_products_tool,
     track_product_tool,
     get_tracked_products_tool,
     untrack_product_tool,
-    analyze_price_tool
+    analyze_price_tool,
+    compare_products_tool
 ]
 
 # ==================================================
@@ -588,7 +658,7 @@ ALL_TOOLS = [
 # ==================================================
 
 async def auto_price_check(context: ContextTypes.DEFAULT_TYPE):
-    print("⏰ [Zamanlayıcı] Takip edilen ürünler taranıyor...")
+    print("\n⏰ [Zamanlayıcı] Takip edilen ürünler internette canlı taranıyor...")
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -601,32 +671,91 @@ async def auto_price_check(context: ContextTypes.DEFAULT_TYPE):
         """)
         tracked_items = cursor.fetchall()
 
+        if not tracked_items:
+            print("ℹ️ Aktif takip edilen ürün bulunmuyor.")
+            return
+
         for item in tracked_items:
             track_id = item[0]
             chat_id = item[1]
             target_price = item[2]
             product_id = item[3]
             product_name = item[4]
-            current_price = item[5]
-            product_url = item[6]
+            old_price = item[5]
+            current_url = item[6]
 
-            if current_price <= target_price:
-                alert_text = (
-                    f"🔥 **FİYAT ALARMI!**\n\n"
-                    f"💻 **Ürün:** {product_name}\n"
-                    f"🎯 **Hedef Fiyatınız:** {target_price:,.0f} TL\n"
-                    f"💰 **Mevcut Fiyat:** {current_price:,.0f} TL\n\n"
-                    f"🔗 [Ürünü Satın Al]({product_url})"
-                )
+            print(f"🔍 Canlı taranıyor: {product_name[:35]}... (Mevcut DB: {old_price:,.0f} TL)")
+
+            try:
+                search_query = product_name[:60]
+                serp_params = {
+                    "engine": "google_shopping",
+                    "q": search_query,
+                    "hl": "tr",
+                    "gl": "tr",
+                    "num": 5
+                }
+                res = serp_client.search(serp_params)
+                shopping_results = res.get("shopping_results", [])
+            except Exception as e:
+                print(f"❌ SerpApi canlı tarama hatası: {e}")
+                continue
+
+            live_price = None
+            live_url = current_url
+
+            for prod in shopping_results:
+                price = prod.get("extracted_price")
+                source = prod.get("source", "").lower()
+                _, link = extract_store_info(prod)
+
+                if price and price > 5000:
+                    live_price = price
+                    if link:
+                        live_url = link
+                    break
+
+            if live_price:
+                print(f"💰 Bulunan Canlı Fiyat: {live_price:,.0f} TL")
+                
+                cursor.execute("""
+                    UPDATE products 
+                    SET price = ?, url = ?
+                    WHERE id = ?
+                """, (live_price, live_url, product_id))
+
                 try:
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=alert_text,
-                        parse_mode="Markdown"
+                    cursor.execute("""
+                        INSERT INTO price_history (product_id, price, checked_at)
+                        VALUES (?, ?, GETDATE())
+                    """, (product_id, live_price))
+                except Exception:
+                    cursor.execute("SELECT ISNULL(MAX(id), 0) + 1 FROM price_history")
+                    new_hist_id = cursor.fetchone()[0]
+                    cursor.execute("""
+                        INSERT INTO price_history (id, product_id, price, checked_at)
+                        VALUES (?, ?, ?, GETDATE())
+                    """, (new_hist_id, product_id, live_price))
+
+                conn.commit()
+
+                if live_price <= target_price:
+                    alert_text = (
+                        f"🔥 **FİYAT ALARMI! HEDEF FİYATA ULAŞILDI!**\n\n"
+                        f"💻 **Ürün:** {product_name}\n"
+                        f"🎯 **Hedef Fiyatınız:** {target_price:,.0f} TL\n"
+                        f"📉 **Yeni Canlı Fiyat:** {live_price:,.0f} TL\n\n"
+                        f"🔗 [Hemen Satın Al]({live_url})"
                     )
-                    print(f"🔔 Bildirim gönderildi: {chat_id} -> {product_name}")
-                except Exception as e:
-                    print(f"❌ Bildirim gönderme hatası: {e}")
+                    try:
+                        await context.bot.send_message(
+                            chat_id=chat_id,
+                            text=alert_text,
+                            parse_mode="Markdown"
+                        )
+                        print(f"🔔 Kullanıcıya fiyat alarmı iletildi! ({chat_id})")
+                    except Exception as e:
+                        print(f"❌ Telegram bildirim hatası: {e}")
 
     except Exception as e:
         print(f"❌ Zamanlayıcı SQL hatası: {e}")
@@ -641,13 +770,12 @@ async def auto_price_check(context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     welcome_text = (
-        "🤖 **Gelişmiş AI Laptop Takip & Analiz Danışmanı Hazır!**\n\n"
-        f"📍 Chat ID: `{chat_id}`\n\n"
-        "Örnek komutlar:\n"
+        "🤖 **Gelişmiş AI Laptop Danışmanı & Fiyat Takipçisi Hazır!**\n\n"
+        "Neler yapabilirim?\n"
         "• *32 GB RAM, RTX 4060 laptop bul*\n"
+        "• *Acer Nitro ile ERAZER modelini karşılaştır*\n"
         "• *Acer Nitro fiyat analizini göster*\n"
-        "• *ERAZER modelini 35.000 TL olunca takip et*\n"
-        "• *Takip listemi göster*"
+        "• *ERAZER modelini 33.000 TL olunca takip et*"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
@@ -713,9 +841,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     result = analyze_by_name(
                         product_name=args.get("product_name", "")
                     )
-                    # Analiz başarılıysa grafik çizmek için ID'yi yakala
                     if result.get("success") and "product_id" in result:
                         chart_product_id = result["product_id"]
+
+                elif tool_name == "compare_products":
+                    result = db_compare_products(
+                        product_1=args.get("product_1", ""),
+                        product_2=args.get("product_2", "")
+                    )
 
                 final_interaction = gemini_client.interactions.create(
                     model="gemini-3.6-flash",
@@ -737,7 +870,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     await update.message.reply_text(final_text)
 
-                # Eğer analiz tool'u çağrıldıysa analiz metninin altına fiyat grafiğini at
                 if chart_product_id:
                     try:
                         chart_buf = generate_price_chart(chart_product_id)
